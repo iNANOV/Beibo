@@ -46,7 +46,7 @@ This fork includes **bug fixes and improvements** to:
 ## How to install 📥
 
 ```py
-pip install beibo
+pip install yfinance pandas darts matplotlib scikit-learn pmdarima prophet --quiet
 ```
   
 ## How to use 💻
