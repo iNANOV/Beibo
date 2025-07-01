@@ -53,13 +53,24 @@ pip install yfinance pandas darts matplotlib scikit-learn pmdarima prophet --qui
 
   
 ```py
-from beibo import oracle
-  
-oracle(
-      portfolio=["TSLA", "AAPL", "NVDA", "NFLX"], #stocks you want to predict
-      start_date = "2020-01-01", #date from which it will take data to predict
-      weights = [0.3, 0.2, 0.3, 0.2], #allocate 30% to TSLA and 20% to AAPL...(equal weighting  by default)
-      prediction_days=30 #number of days you want to predict
+# Step 2: Download the Beibo fork Python script from GitHub
+
+!wget -q https://raw.githubusercontent.com/iNANOV/Beibo/main/src/beibo.py
+
+# Import the 'oracle' function from the downloaded script dynamically
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("beibo", "./beibo.py")
+beibo = importlib.util.module_from_spec(spec)
+sys.modules["beibo"] = beibo
+spec.loader.exec_module(beibo)
+
+beibo.oracle(
+    portfolio=["TSLA", "AAPL", "NVDA", "NFLX"],
+    start_date="2020-01-01",
+    weights=[0.3, 0.2, 0.3, 0.2],
+    prediction_days=30
 )
   
 ```
