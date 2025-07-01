@@ -1,155 +1,193 @@
-import pandas as pd
-import yfinance as yf
 import datetime as dt
-from darts.models import*
-from darts import TimeSeries
-from darts.utils.missing_values import fill_missing_values
-from darts.metrics import mape, mase
 import logging
 import warnings
 from warnings import filterwarnings
 
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from darts import TimeSeries
+from darts.dataprocessing.transformers import MissingValuesFiller
+from darts.models import (
+    ExponentialSmoothing, Prophet, AutoARIMA, Theta, ARIMA,
+    FFT, FourTheta, NaiveDrift, NaiveMean, NaiveSeasonal
+)
+from darts.metrics import mape
 
-#here the magic operates
+
 def oracle(portfolio, start_date, weights=None, prediction_days=None, based_on='Adj Close'):
+    print("Collecting data...")
 
+    if weights is None:
+        weights = [1.0 / len(portfolio)] * len(portfolio)
 
-  print("Collecting datas...")
-  #define weights
-  if weights == None:
-    weights = [1.0 / len(portfolio)] * len(portfolio)
+    today = dt.datetime.today().strftime('%Y-%m-%d')
 
+    # Suppress warnings
+    logger = logging.getLogger()
+    warnings.simplefilter(action='ignore', category=FutureWarning)
+    filterwarnings('ignore')
+    logging.disable(logging.INFO)
 
-  #define today
-  today = dt.datetime.today().strftime('%Y-%m-%d')
+    mape_df = pd.DataFrame(columns=[
+        'Exponential smoothing', 'Prophet', 'Auto-ARIMA', 'Theta(2)', 'ARIMA',
+        'FFT', 'FourTheta', 'NaiveDrift', 'NaiveMean', 'NaiveSeasonal'
+    ])
+    final_df = pd.DataFrame(columns=mape_df.columns)
 
+    for asset in portfolio:
+        print(f"\nProcessing asset: {asset}")
 
-  #clean output from warning
-  logger = logging.getLogger()
-  warnings.simplefilter(action='ignore', category=FutureWarning)
-  filterwarnings('ignore')
-  
-  logging.disable(logging.INFO)
+        # Download data
+        df = yf.download(asset, start=start_date, end=today, progress=False)
 
+        # Handle MultiIndex columns by flattening
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns.values]
 
-  mape_df = pd.DataFrame()
-  mape_df = mape_df.append({'Exponential smoothing' : 0, 'Prophet' : 0, 'Auto-ARIMA' :  0, 'Theta(2)':0, 'ARIMA' : 0, 'FFT' : 0, 'FourTheta' :  0, 'NaiveDrift':0, 'NaiveMean' :  0, 'NaiveSeasonal':0 }, 
-                ignore_index = True)
+        # Determine price column name
+        price_col = f"{based_on}_{asset}" if any(col.endswith(f"_{asset}") for col in df.columns) else based_on
 
-  final_df = pd.DataFrame()
-  final_df = final_df.append({'Exponential smoothing' : 0, 'Prophet' : 0, 'Auto-ARIMA' :  0, 'Theta(2)':0, 'ARIMA' : 0, 'FFT' : 0, 'FourTheta' :  0, 'NaiveDrift':0, 'NaiveMean' :  0, 'NaiveSeasonal':0 },
-                ignore_index = True)
+        # Fallback logic for missing columns
+        if price_col not in df.columns:
+            if based_on == 'Adj Close':
+                fallback_col = f"Close_{asset}" if any(col.endswith(f"_{asset}") for col in df.columns) else "Close"
+                if fallback_col in df.columns:
+                    print(f"'{based_on}' not found for {asset}. Falling back to '{fallback_col}'.")
+                    price_col = fallback_col
+                else:
+                    print(f"Error: Neither '{based_on}' nor 'Close' found for {asset}. Skipping.")
+                    continue
+            else:
+                print(f"Error: Column '{based_on}' not found for {asset}. Skipping.")
+                continue
 
-  for asset in portfolio:
+        # Prepare DataFrame for darts
+        df_asset = df[[price_col]].copy()
+        df_asset = df_asset.rename(columns={price_col: 'value'})
+        df_asset.index.name = 'Date'
+        df_asset = df_asset.reset_index()
+        df_asset = df_asset.rename(columns={'Date': 'time'})
 
-    result = pd.DataFrame()
-    df = yf.download(asset, start=start_date, end=today, progress=False)["Adj Close"]
-    df = pd.DataFrame(df)
-    df.reset_index(level=0, inplace=True)
+        if 'time' not in df_asset.columns:
+            print(f"Date column not found for {asset}. Skipping.")
+            continue
 
-    if prediction_days==None:
-      x = 1
-      while x/(len(df)+x) < 0.3:
-        x+=1
-        prediction_days = x
+        # Determine prediction_days if None
+        if prediction_days is None:
+            x = 1
+            while x / (len(df_asset) + x) < 0.3:
+                x += 1
+            prediction_days = x
 
-    def eval_model(model):
-      model.fit(train)
-      forecast = model.predict(len(val))
-      result[model] = [mape(val, forecast)]
+        def eval_model(model):
+            model.fit(train)
+            forecast = model.predict(len(val))
+            result[model] = [mape(val, forecast)]
 
-    prediction = pd.DataFrame()
+        prediction = pd.DataFrame()
 
+        def predict(model):
+            model.fit(train)
+            _ = model.predict(len(val))
+            pred = model.predict(prediction_days)
+            pred_val = pred[-1].values()
+            pred_val = pred_val.item() if hasattr(pred_val, 'item') else pred_val
+            pct_change = round(((pred_val - start_value) / start_value) * 100, 3)
+            prediction[model] = [f"{pct_change} %"]
 
-    def predict(model):
-      model.fit(train)
-      forecast = model.predict(len(val))
-      pred = model.predict(prediction_days)
-      b = [str(pred[-1][0][0])][0]
-      b = b.split("array([[[")
-      c = b[1].split("]]])")
-      d = c[0][ : -3] 
-      b = float(d)
-      prediction[model] = [str(round(((b-start_value)/start_value)*100,3))+' %']
+        try:
+            series = TimeSeries.from_dataframe(df_asset, time_col='time', value_cols='value', freq='D')
+        except Exception as e:
+            print(f"Could not create time series for {asset}: {e}")
+            continue
 
-    series = TimeSeries.from_dataframe(df, 'Date', based_on, freq='D')
-    series = fill_missing_values(series)
+        series = MissingValuesFiller().transform(series)
 
-    train_index = round(len(df.index)*0.7)
-    train_date = df.loc[[train_index]]['Date'].values
-    date = str(train_date[0])[:10]
-    date = date.replace('-', '') 
-    timestamp = date+'000000'
-    train, val = series.split_before(pd.Timestamp(timestamp))
+        train_index = round(len(df_asset) * 0.7)
+        train_date = df_asset.loc[train_index, 'time']
+        timestamp = pd.Timestamp(train_date)
 
-    print("Evaluating the models for "+str(asset)+"...")
+        try:
+            train, val = series.split_before(timestamp)
+        except Exception as e:
+            print(f"Split failed for {asset}: {e}")
+            continue
 
-    eval_model(ExponentialSmoothing())
-    eval_model(Prophet())
-    eval_model(AutoARIMA())
-    eval_model(Theta())
-    eval_model(ARIMA())
-    eval_model(FFT())
-    eval_model(FourTheta())
-    eval_model(NaiveDrift())
-    eval_model(NaiveMean())
-    eval_model(NaiveSeasonal())
+        print(f"Evaluating the models for {asset}...")
+        result = pd.DataFrame()
+        try:
+            eval_model(ExponentialSmoothing())
+            eval_model(Prophet())
+            eval_model(AutoARIMA())
+            eval_model(Theta())
+            eval_model(ARIMA())
+            eval_model(FFT())
+            eval_model(FourTheta())
+            eval_model(NaiveDrift())
+            eval_model(NaiveMean())
+            eval_model(NaiveSeasonal())
+        except Exception as e:
+            print(f"Model evaluation error for {asset}: {e}")
+            continue
+        print("Models evaluated!")
 
-    print("Models evaluated!")
+        result.columns = mape_df.columns
+        result.index = [asset]
+        mape_df = pd.concat([mape_df, result])
 
-    result.columns = ['Exponential smoothing','Prophet', 'Auto-ARIMA', 'Theta(2)', 'ARIMA', 'FFT','FourTheta','NaiveDrift','NaiveMean', 'NaiveSeasonal']
-    result.index = [asset]
-    mape_df = pd.concat([result, mape_df])
-    start_pred = str(df["Date"].iloc[-1])[:10]
-    start_value = df[based_on].iloc[-1]
-    start_pred = start_pred.replace('-', '') 
-    timestamp = start_pred+'000000'
-    train, val = series.split_before(pd.Timestamp(timestamp))
-    
-    print("Making the predictions for "+str(asset)+"...")
-    predict(ExponentialSmoothing())
-    predict(Prophet())
-    predict(AutoARIMA())
-    predict(Theta())
-    predict(ARIMA())
-    predict(FFT())
-    predict(FourTheta())
-    predict(NaiveDrift())
-    predict(NaiveMean())
-    predict(NaiveSeasonal())
-    print("Predictions generated!")
+        start_value = df_asset['value'].iloc[-1]
 
-    prediction.columns = ['Exponential smoothing','Prophet', 'Auto-ARIMA', 'Theta(2)', 'ARIMA', 'FFT','FourTheta','NaiveDrift','NaiveMean', 'NaiveSeasonal']
-    prediction.index = [asset]
-    final_df = pd.concat([prediction, final_df])
+        # split train/val again for prediction on latest data
+        try:
+            train, val = series.split_before(df_asset['time'].iloc[-1])
+        except Exception:
+            val = series[-prediction_days:]
+            train = series[:-prediction_days]
 
-  print("\n")
-  print("Assets MAPE (accuracy score)")
-  with pd.option_context('display.max_rows', None, 'display.max_columns', None) and pd.option_context('expand_frame_repr', False):
-    print(mape_df.iloc[:-1,:])
-  mape_df = pd.DataFrame(mape_df.iloc[:-1,:])
-  print("\n")
-  print("Assets returns prediction for the next "+str(prediction_days)+" days")
-  with pd.option_context('display.max_rows', None, 'display.max_columns', None) and pd.option_context('expand_frame_repr', False):
-    print(final_df.iloc[:-1,:])
-  final_df = pd.DataFrame(final_df.iloc[:-1,:])
-  
-  portfolio_pred = pd.DataFrame()
+        print(f"Making the predictions for {asset}...")
+        try:
+            predict(ExponentialSmoothing())
+            predict(Prophet())
+            predict(AutoARIMA())
+            predict(Theta())
+            predict(ARIMA())
+            predict(FFT())
+            predict(FourTheta())
+            predict(NaiveDrift())
+            predict(NaiveMean())
+            predict(NaiveSeasonal())
+        except Exception as e:
+            print(f"Prediction error for {asset}: {e}")
+            continue
+        print("Predictions generated!")
 
-  for column in final_df.columns:
-    rets = []
-    for index in final_df.index:
-      place = portfolio.index(index)
-      returns = float(final_df[column][index][:-1])
-      wts = weights[portfolio.index(index)]
-      ret = (returns*wts)
-      rets.append(ret)
-    portfolio_pred[column] = rets
-    portfolio_pred[column] = portfolio_pred[column].sum()
+        prediction.columns = mape_df.columns
+        prediction.index = [asset]
+        final_df = pd.concat([final_df, prediction])
 
-  print("\n")
-  print("Portfolio returns prediction for the next "+str(prediction_days)+" days")
-  print(portfolio_pred.iloc[0])
-  
+    print("\nAssets MAPE (accuracy score):")
+    print(mape_df)
 
-  logger.disabled = False
+    print(f"\nAssets returns prediction for the next {prediction_days} days:")
+    print(final_df)
+
+    # Portfolio aggregation
+    portfolio_pred = pd.DataFrame()
+    for column in final_df.columns:
+        weighted_returns = []
+        for index in final_df.index:
+            try:
+                percent = float(final_df[column][index].replace('%', '').strip())
+                wts = weights[portfolio.index(index)]
+                weighted_returns.append(percent * wts)
+            except Exception as e:
+                print(f"Error processing {index} for model {column}: {e}")
+                continue
+        portfolio_pred[column] = [sum(weighted_returns)]
+
+    print(f"\nPortfolio returns prediction for the next {prediction_days} days:")
+    print(portfolio_pred.iloc[0])
+
+    logger.disabled = False
+    return portfolio_pred
