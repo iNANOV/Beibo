@@ -21,12 +21,27 @@
 
 <br/>
 <br/>
+
+This is a **fork** of the original [Beibo](https://github.com/ssantoshp/Beibo) project by Santosh Passoubady.
   
 **Beibo** is a **Python** library that uses several **AI prediction models** to predict **stocks returns** over a defined period of time. 
 
 It was firstly introduced in one of my previous package called [**Empyrial**](https://github.com/ssantoshp/Empyrial). 
   
 _Disclaimer: Information is provided 'as is' and solely for informational purposes, not for trading purposes or advice._
+
+---
+
+## What’s new in this fork
+
+This fork includes **bug fixes and improvements** to:
+
+- Fix prediction value extraction and rounding issues  
+- Handle yfinance data multi-index column structures  
+- Improve compatibility with latest Darts and pandas versions  
+- Fix some edge cases causing runtime errors
+
+---
 
 ## How to install 📥
 
